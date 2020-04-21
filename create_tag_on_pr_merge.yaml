@@ -1,0 +1,126 @@
+---
+name: Create Tag on Pull Request Merge
+on:
+  pull_request:
+    types: closed
+
+jobs:
+  tag_merged_pr:
+    name: Create Tag on PR Merge
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: '0'
+
+      # This step fetches the tags from the repo and grabs the latest tag.
+      # If there are no tags, we set the versioning at 0.0.0
+      # We strip out the leading v and any environments appended to the tag
+      # Then we check the logs for #major, #minor, #patch to determine whether this will be
+      # a major, minor or patch version update(patch is default)
+      # we then reconstruct the version with the leading v and append the -dev environment suffix
+      # tags are pushed to the repo
+      - name: Tag Change
+        run: |
+          set -x
+          git fetch --depth=1 origin +refs/tags/*:refs/tags/*
+          latest_version_full="$(git tag | sort -r --version-sort | head -n1)"
+          log=$(git log $latest_version_full..HEAD --pretty='%B')
+          if [ -z "$latest_version_full" ]
+          then
+            latest_version_full="0.0.0"
+          fi
+          latest_version_full=${latest_version_full#"v"}
+          version_full=( ${latest_version_full//-/ } )
+          version="${version_full[0]}"
+          echo "$version"
+          IFS='.' read -r -a version_array <<< "$version"
+          if [ ${#version_array[@]} -ne 3 ]
+          then
+            version_array+=(0)
+          fi
+          case "$log" in
+            *#major* )
+              major_version=${version_array[0]}
+              let "major_version+=1"
+              version_array[0]=$major_version
+              version_array[1]=0
+              version_array[2]=0
+              ;;
+            *#minor* )
+              minor_version=${version_array[1]}
+              let "minor_version+=1"
+              version_array[1]=$minor_version
+              version_array[2]=0
+              ;;
+            *#patch* )
+              patch_version=${version_array[2]}
+              let "patch_version+=1"
+              version_array[2]=$patch_version
+              ;;
+            * )
+              patch_version=${version_array[2]}
+              let "patch_version+=1"
+              version_array[2]=$patch_version
+              ;;
+          esac
+          new_version="v${version_array[0]}.${version_array[1]}.${version_array[2]}"
+          echo "new_version=$new_version">>version.env
+          echo "New version: ${new_version}"
+          dev_version="${new_version}-dev"
+          echo "dev_version=$dev_version">>version.env
+          commit_sha="${{ github.sha }}"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag "${dev_version}" "$commit_sha"
+          git push --tags
+        shell: bash
+
+      - name: Upload Version.env
+        uses: actions/upload-artifact@v1
+        with:
+          name: version
+          path: version.env
+
+  label_pull_request:
+    name: Add Tag Label To Pull Request
+    if: github.event.pull_request.merged
+    needs: [tag_merged_pr]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Download Depoloy Env
+        uses: actions/download-artifact@v1
+        with:
+          name: version
+
+      - name: Setup Deploy Env Vars
+        run: |
+          set -x
+          source version/version.env
+          echo "::set-env name=NEW_VERSION::$(echo $new_version)"
+
+      # Leverages the open source labeler action
+      # Driven by a config file named labeler.yaml
+      # Applies a label based on the paths specified in the config file
+      # This label is used by the control repo to determine which job to trigger for deployment
+      - name: Add Code Label To Pull Request
+        uses: actions/labeler@v2
+        with:
+          repo-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      # Applies a label to the pull request with the version(excluding environment)
+      # Used by control repo to search for the change for the supplied version
+      - name: Add Tag Label To Pull Request
+        run: |
+          git fetch --depth=1 origin +refs/tags/*:refs/tags/*
+          #fetch latest semvar tag
+          latest_version_full="$(git tag | sort -r --version-sort | head -n1)"
+          curl -X POST "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" \
+            -H 'Accept: application/vnd.github.everest-preview+json' \
+            -u ${{ secrets.ACCESS_TOKEN }} \
+            -d '{ "labels": [ "'"${NEW_VERSION}"'" ] }'
