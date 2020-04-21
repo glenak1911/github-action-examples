@@ -1,0 +1,45 @@
+---
+name: Update Semvar Tag
+on: 
+  repository_dispatch:
+    types: update-tag
+
+jobs: 
+ update_tag:
+    name: Update Deployed Tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Target Repo
+        uses: actions/checkout@v2
+        with:
+          repository: ${{ github.event.client_payload.repository }}
+          token: ${{ secrets.ACCESS_TOKEN }}
+          ref: ${{ github.event.client_payload.tag }}
+
+      - name: Update Tag
+        run: |
+          set -x
+          git fetch --depth=1 origin +refs/tags/*:refs/tags/*
+          old_tag_name="${{ github.event.client_payload.tag }}"
+          tag_exist="$(git tag -l $old_tag_name)"
+          if [ -z "$tag_exist" ]; then
+            echo "Tag Does not exist or already updated"
+            exit 0
+          else
+            tag_commit="$(git rev-list -n 1 $old_tag_name)"
+            old_version_full=( ${old_tag_name//-/ } )
+            version="${old_version_full[0]}"
+            echo "Version number - ${version}"
+            new_tag_name="${version}-${{ github.event.client_payload.environment }}"
+            new_tag_exist="$(git tag -l $new_tag_name)"
+            if [ -z "$new_tag_exist" ]; then
+              echo "::set-env name=DEPLOY_ENV::$(echo $deploy_env)"
+              git config --local user.email "action@github.com"
+              git config --local user.name "GitHub Action"
+              git tag "${new_tag_name}" "$tag_commit"
+              git push --tags
+            else
+              echo "Tag ${new_tag_name} already exists"
+              exit 0
+            fi
+          fi
