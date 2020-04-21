@@ -1,0 +1,117 @@
+---
+name: Basic Github Action Template
+# The `on` section will determine appropriate events that should trigger the workflow
+# We can restrict the workflow to trigger based on different events, and further filter that 
+# to determine whether certain branches or changes to particular paths should trigger workflow
+# Reference: https://help.github.com/en/actions/reference/events-that-trigger-workflows
+# leveraging repository_dispatch as an event trigger will require a type to be defined, which is a custom value
+on:
+  repository_dispatch:
+    types: [repo_dispatch_value] # This is a custom value that should be changed to a unique descriptive value(eg: build_ecs_image, deploy_lambda_layer, etc) 
+  push: # The triggers that execute workflow should be changed based on the use case(eg: push, pull request, etc)
+    branches: # for most triggers we can configure the branches and paths that the workflow should be executed against
+      - '*'
+      - '*/*'
+      - '*-*'
+      - '!master'
+    paths:
+      - 'path/to/changed/files'
+
+# Job Definitions
+# Workflow files can incorporate multiple jobs. These jobs can be configured to run in parallel(default), or sequentially
+# Reference: https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idneeds
+
+jobs:
+  example_job: # The logical name for the job - this name can be referenced by other jobs to determine dependency, refreence values
+    name: Example # This name functions as a descriptor about the job and appears during the run in the Github console
+    runs-on: ubuntu-latest # Specifies the os that the workflow runs on. Other options can be found here: https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-on
+    steps:
+      # Parsing Payloads, Configs, etc
+      # When jobs are triggered, there will most likely be a payload or environemnt specific variables that need to be set
+      # While this logic can fit into a single step, it might be worth separating into multiple steps if further separation is required
+      # This step is an example of a step that parses the environment, tag, and test flag payload from a repository dispatch event called "repo_dispatch_value"
+      # If the action was triggered by a push and not by the "repo_dispatch_value"(based on the `on` section, the workflow is configured to run on push or repository_dispatch)
+      # The variables are set to specific(dev) values. 
+      # We then test the variables to ensure they are not empty, and export them as global environment variables that can be used by any other step in the job
+      # We also set the aws account id based on the environment
+      # Notice the  account id leverages the github action secrets manager ${{ secrets.AWS_NON_PROD_ACCOUNT_ID/PROD_ACCOUNT_ID }}. To use this syntax the account id would need to be added to Github Secrets with the name AWS_NONPROD_ACCOUNT_ID/AWS_PROD_ACCOUNT_ID
+      # We can also set environment variables globally(for job) by using the syntax: `echo "::set-env name=VARIABLE_NAME::variable_value"`
+      - name: Parse Payload/Configuration
+        run: |
+          set -x
+          if [[ "${{ github.event.action }}" == "repo_dispatch_value" ]]; then 
+            deploy_env="${{ github.event.client_payload.environment }}"
+            release_tag="${{ github.event.client_payload.tag }}"
+            run_test="${{ github.event.client_payload.run_test }}"
+          else
+            deploy_env="dev"
+            release_tag="${{ github.ref }}"
+            run_test="true"
+          fi          
+          test -n "$deploy_env" || (echo "Deployment Environment not specified" && exit 1)
+          test -n "$release_tag" || (echo "Tag/Branch not specified" && exit 1)
+          test -n "$run_test" || (echo "Test flag not specified" && exit 1)
+          echo "::set-env name=RELEASE_TAG::$(echo $release_tag)"
+          echo "::set-env name=DEPLOY_ENV::$(echo $deploy_env)"
+          echo "::set-env name=RUN_TEST::$(echo $run_test)"
+          if [[ "$deploy_env" == "dev" ]] || [[ "$deploy_env" == "qa" ]] || [[ "$deploy_env" == "uat" ]]; then
+            echo "::set-env name=AWS_ACCOUNT::${{ secrets.AWS_NONPROD_ACCOUNT_ID }}"
+          elif [[ "$deploy_env" == "prod" ]] || [[ "$deploy_env" == "eval" ]]; then
+            echo "::set-env name=AWS_ACCOUNT::${{ secrets.AWS_PROD_ACCOUNT_ID }}"
+          fi
+
+      # Checkout Repo
+      # In order to access the files in the repo where the action is executed, we will need to checkout the repo
+      # The easiest way to do this is using the pre-built checkout action from the Github Actions Marketplace
+      # Reference: https://github.com/marketplace/actions/checkout
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ env.RELEASE_TAG }} # references an environment variable called RELEASE_TAG, this can be removed to default to the branch that triggers the action, or modified to refer to a specific branch,tag, etc.
+
+      # Generate AWS Credentials
+      # In order to interact with AWS resources we will need to be able to assume a role and generate temporary credentials
+      # This leverages the pre-built configure-aws-credentials action from the Github Action marketplace
+      # The role/region can be updated to whichever role is created and appropriate for the action
+      # Reference: https://github.com/aws-actions/configure-aws-credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT }}:role/GithubActions_ML_Role # The syntax here refers to the AWS_ACCOUNT variable set in the Parse Payload/Configuration step. The role/account can be changed based on the use case
+          role-duration-seconds: 900
+
+      # Core Workflow
+      # There should be at least 1 step that executes logic to perform the main function of the job
+      # This can span a single step or leverage multiple steps, depending on the use case
+      - name: EXAMPLE - Setup Python 3.7
+        uses: actions/setup-python@v1
+        with:
+          python-version: '3.7'
+
+      - name: EXAMPLE - Run Build
+        run: |
+          set -x
+          python build_scripts/build.py
+          test -f output.zip
+
+      - name: EXAMPLE - Copy to S3
+        run: |
+          aws s3 sync s3://<s3_bucket_name> *
+
+      # Test/Status Triggers 
+      # Upon successful completion of the core logic, we can send additional repsitory dispatch actions to trigger additional jobs
+      # These jobs can include reporting a status, or triggering a build or deployment
+      # This can be an action to run a script or to execute a pre-built action
+      # The current example uses a pre-built repository dispatch action
+      # https://github.com/marketplace/actions/repository-dispatch
+      - name: EXAMPLE - Trigger deploy
+        if: success()
+        uses: peter-evans/repository-dispatch@v1
+        with:
+          token: ${{ secrets.ACCESS_TOKEN }}
+          repository: ${{github.repo}}
+          event-type: deploy_trigger
+          client-payload: '{"environment": "${{env.DEPLOY_ENV}}", "tag": "${{github.ref}}", "run_test": "${{env.RUN_TEST}}"}'
