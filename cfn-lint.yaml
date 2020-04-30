@@ -1,0 +1,38 @@
+---
+name: Run Linter
+on: [push]
+
+jobs:
+  linting:
+    name: Lint CFN
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the current repo
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      # Use Python3.6 environment
+      - name: Setup Python 3.6
+        uses: actions/setup-python@v1
+        with:
+          python-version: '3.6'
+
+      - name: Install linters
+        run: pip install yamllint
+
+      - name: Lint YAML
+        run: yamllint ./*
+
+      - name: Lint JSON
+        run: python -m json.tool ./**/*.json
+
+      - name: Run cfn-lint on yaml
+        uses: docker://scottbrenner/cfn-lint-action:latest
+        with:
+          args: ./**/*.yaml
+
+      # Verify JSON Support
+      - name: Run cfn-lint on json
+        uses: docker://scottbrenner/cfn-lint-action:latest
+        with:
+          args: ./**/*.json
